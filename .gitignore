@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 venv/
 temp_audio.wav
+
+.memory.json
+.memory-*.tmp

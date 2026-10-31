@@ -85,3 +85,21 @@ Jarvis currently performs a limited allowlist of local PC actions.
 It does not execute arbitrary AI-generated shell commands. Temporary
 audio recordings made during transcription are deleted after each
 transcription attempt, including failures.
+
+
+## Local memory (next-stage foundation)
+
+Jarvis does **not** automatically store conversations as long-term memory.
+Say "Jarvis, remember that my favorite color is teal" to save one note.
+Say "Jarvis, list memories" to hear numbered notes, then "Jarvis, forget note 1"
+to remove a specific note. Local notes are stored in
+`~/.jarvisai/memory.json` under the current Windows user profile.
+The file is **not encrypted**: anyone with file access may read it. Do not
+store secrets such as passwords. The note cap is 30, with 240 characters
+per note. To clear all notes, stop Jarvis, delete the memory file manually,
+and restart; a guarded clearing UI is planned.
+
+## Development roadmap
+
+See [ROADMAP.md](ROADMAP.md) for the staged voice, AI/memory,
+Windows-control, and UI implementation plan.
