@@ -97,5 +97,5 @@ def handle_memory_command(command, memory):
             return memory.forget(int(number))
         return "Say forget note followed by its number."
     if lower == "clear all memories":
-        return "To clear memory, type 'clear all memories' in the console confirmation prompt."
+        return "To clear all saved notes, stop Jarvis and delete the file at " + str(memory.path)
     return None
