@@ -6,6 +6,8 @@ import tempfile
 import threading
 import queue
 
+from jarvis_core import remove_wake_word, choose_model_for_prompt
+
 import ollama
 import psutil
 import pyttsx3
@@ -18,6 +20,9 @@ from faster_whisper import WhisperModel
 # ============================================================
 
 
+MODEL_FAST = os.environ.get("JARVIS_MODEL_FAST", "qwen3:8b")
+MODEL_SMART = os.environ.get("JARVIS_MODEL_SMART", "qwen3:8b")
+
 WHISPER_MODEL = "base"
 
 WAKE_WORD = "jarvis"
@@ -25,11 +30,6 @@ WAKE_WORD = "jarvis"
 VOICE_RATE = 180
 
 MAX_HISTORY = 12
-
-TEMP_AUDIO = os.path.join(
-    tempfile.gettempdir(),
-    "jarvis_audio.wav"
-)
 
 # Keywords that push JARVIS to use the smarter (slower) model.
 SMART_KEYWORDS = [
@@ -64,6 +64,7 @@ print("\n🔊 Loading voice engine...")
 tts_queue = queue.Queue()
 tts_ready = threading.Event()
 tts_engine = None  # created inside the worker thread, not here
+tts_error = None
 
 
 def _tts_worker():
@@ -77,11 +78,16 @@ def _tts_worker():
     engine here keeps everything on a single thread and avoids that.
     """
 
-    global tts_engine
+    global tts_engine, tts_error
 
-    tts_engine = pyttsx3.init()
-    tts_engine.setProperty("rate", VOICE_RATE)
-    tts_engine.setProperty("volume", 1.0)
+    try:
+        tts_engine = pyttsx3.init()
+        tts_engine.setProperty("rate", VOICE_RATE)
+        tts_engine.setProperty("volume", 1.0)
+    except Exception as error:
+        tts_error = error
+        tts_ready.set()
+        return
 
     tts_ready.set()
 
@@ -112,7 +118,10 @@ tts_thread.start()
 
 # Wait for the engine to actually finish initializing before continuing,
 # so nothing tries to queue speech before it's ready.
-tts_ready.wait(timeout=10)
+if not tts_ready.wait(timeout=10):
+    raise RuntimeError("Voice engine did not initialize within 10 seconds.")
+if tts_error is not None:
+    raise RuntimeError("Voice engine failed to initialize.") from tts_error
 
 print("✅ Voice engine ready!")
 
@@ -206,22 +215,9 @@ conversation = [
 # ============================================================
 
 def choose_model(prompt):
-    """
-    Cheap heuristic: use the smart (slower) model for anything that
-    looks like coding, math, or a request for a deep/long explanation.
-    Everything else uses the fast model.
-    """
-
-    text = prompt.lower()
-
-    if len(text.split()) > 40:
-        return MODEL_SMART
-
-    for kw in SMART_KEYWORDS:
-        if kw in text:
-            return MODEL_SMART
-
-    return MODEL_FAST
+    return choose_model_for_prompt(
+        prompt, MODEL_FAST, MODEL_SMART, SMART_KEYWORDS
+    )
 
 
 # ============================================================
@@ -502,14 +498,19 @@ def listen():
         print("❌ Microphone error:", e)
         return None
 
+    temp_path = None
+
     try:
         wav_data = audio.get_wav_data()
 
-        with open(TEMP_AUDIO, "wb") as file:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix="jarvis_", suffix=".wav", delete=False
+        ) as file:
             file.write(wav_data)
+            temp_path = file.name
 
         segments, info = whisper.transcribe(
-            TEMP_AUDIO,
+            temp_path,
             language="en",
             beam_size=3,
             best_of=3,
@@ -531,6 +532,13 @@ def listen():
     except Exception as e:
         print("❌ Whisper error:", e)
         return None
+
+    finally:
+        if temp_path is not None:
+            try:
+                os.remove(temp_path)
+            except OSError as error:
+                print("⚠️ Could not remove temporary audio:", error)
 
 
 # ============================================================
@@ -703,17 +711,6 @@ def stream_ai_response(prompt):
 # WAKE WORD
 # ============================================================
 
-def remove_wake_word(command):
-    text = command.strip()
-    lower = text.lower()
-
-    if lower.startswith(WAKE_WORD):
-        remaining = text[len(WAKE_WORD):].strip()
-        return remaining
-
-    return None
-
-
 # ============================================================
 # MICROPHONE CALIBRATION
 # ============================================================
@@ -748,32 +745,36 @@ try:
 
     while True:
 
+        # Wait for JARVIS to finish speaking before re-opening the mic.
+        wait_until_done_speaking()
         command = listen()
 
         if command is None:
             continue
 
+        # Ignore background speech unless it begins with the wake phrase.
+        wake_command = remove_wake_word(command)
+        if wake_command is None:
+            continue
+
+        if not wake_command:
+            speak("Yes?")
+            wait_until_done_speaking()
+            command = listen()
+            if command is None:
+                continue
+        else:
+            command = wake_command
+
         command_lower = command.lower().strip()
 
-        # EXIT
+        # EXIT — only after an explicit wake phrase.
         if command_lower in [
             "exit", "quit", "shutdown", "goodbye", "goodbye jarvis"
         ]:
             speak("Goodbye.")
             wait_until_done_speaking()
             break
-
-        # WAKE WORD
-        wake_command = remove_wake_word(command)
-
-        if wake_command is not None:
-
-            if not wake_command:
-                speak("Yes?")
-                continue
-
-            command = wake_command
-            command_lower = command.lower().strip()
 
         # GREETINGS
         if command_lower in ["hello", "hi", "hey"]:
@@ -793,11 +794,6 @@ try:
 
 except KeyboardInterrupt:
     print("\n\n🛑 JARVIS stopped.")
-    try:
-        if tts_engine is not None:
-            tts_engine.stop()
-    except Exception:
-        pass
 
 
 finally:
@@ -807,10 +803,7 @@ finally:
     except Exception:
         pass
 
-    try:
-        if os.path.exists(TEMP_AUDIO):
-            os.remove(TEMP_AUDIO)
-    except Exception:
-        pass
+    # Worker owns its voice engine; avoid calling it from the main thread.
+    tts_thread.join(timeout=3)
 
     print("\nJARVIS offline.")

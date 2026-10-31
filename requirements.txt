@@ -1,0 +1,6 @@
+ollama
+faster-whisper
+SpeechRecognition
+PyAudio
+psutil
+pyttsx3
